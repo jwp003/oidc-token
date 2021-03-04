@@ -7,31 +7,35 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
-	"time"
 
 	"github.com/coreos/go-oidc"
 	"golang.org/x/oauth2"
 )
 
 func main() {
-	var idp, clientID, clientSecret string
+	var idp, clientID, clientSecret, listen string
+	var verbose bool
 
 	flag.StringVar(&idp, "idp", "", "URL of OIDC identity provider")
 	flag.StringVar(&clientID, "client", "", "client-id")
 	flag.StringVar(&clientSecret, "secret", "", "client-secret")
+	flag.StringVar(&listen, "listen", "localhost:8888", "address to listen on for auth redirect")
+	flag.BoolVar(&verbose, "v", false, "verbose mode")
 	flag.Parse()
 
-	log.SetOutput(os.Stderr)
+	log := nullLog
+	if verbose {
+		log = verboseLog
+	}
 
 	// Init OIDC client
 	provider, err := oidc.NewProvider(context.Background(), idp)
 	if err != nil {
-		log.Fatalf("init idp: %s", err)
+		exit("init idp: %s", err)
 	}
 
 	// Generate tokens
@@ -44,30 +48,28 @@ func main() {
 
 	// Setup auth redirect handler
 	http.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("got redirect: %s", r.URL.String())
+		log("got redirect: %s", r.URL.String())
 
 		w.WriteHeader(200)
 
 		if r.URL.Query().Get("state") != state {
-			log.Printf("bad state: ignoring")
+			log("bad state: ignoring")
 			return
 		}
 
 		pendingCode <- r.URL.Query().Get("code")
 	})
 
-	// TODO: Pick unused port
-	addr := "localhost:8888"
-
 	// Start background webserver
-	go http.ListenAndServe("localhost:8888", nil)
+	go http.ListenAndServe(listen, nil)
+	log("started web server on %s", listen)
 
 	oauth := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		Scopes:       []string{"openid"},
 		Endpoint:     provider.Endpoint(),
-		RedirectURL:  "http://" + addr + "/redirect",
+		RedirectURL:  "http://" + listen + "/redirect",
 	}
 
 	// Generate login URL
@@ -76,7 +78,7 @@ func main() {
 		oauth2.SetAuthURLParam("code_challenge", challenge),
 	}
 	login := oauth.AuthCodeURL(state, options...)
-	log.Printf("redirecting to login: %s", login)
+	log("redirecting to login: %s", login)
 
 	// Open auth page in browser
 	// TODO: Support other OS
@@ -84,25 +86,20 @@ func main() {
 	stderr := bytes.NewBuffer(nil)
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
-		log.Printf("error opening browser: %s", err)
-		log.Printf("stderr: %s", stderr.String())
-		os.Exit(1)
+		log("stderr: %s", stderr.String())
+		exit("error opening browser: %s", err)
 	}
 
 	// Make POST request to retrieve access_token
 	token, err := oauth.Exchange(context.Background(), <-pendingCode, oauth2.SetAuthURLParam("code_verifier", verifier))
 	if err != nil {
-		log.Fatalf("error exchanging token: %s", err)
+		exit("error exchanging token: %s", err)
 	}
 
 	// TODO: Cache and reuse access_token
 	// TODO: Cache and use refresh_token
 
-	log.Printf("got refresh token: %s", token.RefreshToken)
-	log.Printf("got access token (%s): %s", token.Expiry.Sub(time.Now()), token.AccessToken)
-
-	// TODO: Verify?
-	// TODO: Log the payload?
+	log("got access token: valid to %s", token.Expiry)
 
 	fmt.Print(token.AccessToken)
 }
@@ -120,4 +117,20 @@ func generate(length uint) string {
 func challengify(s string) string {
 	hash := sha256.Sum256([]byte(s))
 	return base64.RawURLEncoding.EncodeToString(hash[:])
+}
+
+func nullLog(_ string, _ ...interface{}) {
+	return
+}
+
+func verboseLog(format string, a ...interface{}) {
+	if format[len(format)-1] != '\n' {
+		format += "\n"
+	}
+	fmt.Fprintf(os.Stderr, format, a...)
+}
+
+func exit(format string, a ...interface{}) {
+	verboseLog(format, a...)
+	os.Exit(1)
 }
