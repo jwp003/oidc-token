@@ -11,19 +11,36 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 
+	"github.com/BurntSushi/toml"
 	"github.com/coreos/go-oidc"
 	"golang.org/x/oauth2"
 )
 
+var config = struct {
+	ListenAddress string
+	Providers     []struct {
+		Name         string
+		URL          string
+		ClientID     string
+		ClientSecret string
+		Scopes       []string
+	}
+}{
+	ListenAddress: "localhost:8888",
+}
+
 func main() {
-	var idp, clientID, clientSecret, listen string
+	var name string
 	var verbose bool
 
-	flag.StringVar(&idp, "idp", "", "URL of OIDC identity provider")
-	flag.StringVar(&clientID, "client", "", "client-id")
-	flag.StringVar(&clientSecret, "secret", "", "client-secret")
-	flag.StringVar(&listen, "listen", "localhost:8888", "address to listen on for auth redirect")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		exit("error getting config dir: %s", err)
+	}
+	dir := filepath.Join(home, ".config", "oidc-token")
+
 	flag.BoolVar(&verbose, "v", false, "verbose mode")
 	flag.Parse()
 
@@ -32,8 +49,32 @@ func main() {
 		log = verboseLog
 	}
 
+	if _, err := toml.DecodeFile(filepath.Join(dir, "config.toml"), &config); err != nil {
+		exit("error loading config: %s", err)
+	}
+
+	log("config loaded with %d providers", len(config.Providers))
+
+	if len(config.Providers) < 1 {
+		exit("no providers configured")
+	}
+
+	p := config.Providers[0]
+	name = flag.Arg(0)
+
+	if name != "" {
+		for _, v := range config.Providers {
+			if name == v.Name {
+				p = v
+				goto done
+			}
+		}
+		exit("no provider: %s", name)
+	}
+done:
+
 	// Init OIDC client
-	provider, err := oidc.NewProvider(context.Background(), idp)
+	provider, err := oidc.NewProvider(context.Background(), p.URL)
 	if err != nil {
 		exit("init idp: %s", err)
 	}
@@ -61,15 +102,15 @@ func main() {
 	})
 
 	// Start background webserver
-	go http.ListenAndServe(listen, nil)
-	log("started web server on %s", listen)
+	go http.ListenAndServe(config.ListenAddress, nil)
+	log("started web server on %s", config.ListenAddress)
 
 	oauth := &oauth2.Config{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		Scopes:       []string{"openid"},
+		ClientID:     p.ClientID,
+		ClientSecret: p.ClientSecret,
+		Scopes:       p.Scopes,
 		Endpoint:     provider.Endpoint(),
-		RedirectURL:  "http://" + listen + "/redirect",
+		RedirectURL:  "http://" + config.ListenAddress + "/redirect",
 	}
 
 	// Generate login URL
