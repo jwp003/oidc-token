@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/gob"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -73,10 +74,37 @@ func main() {
 	}
 done:
 
+	cachefile := filepath.Join(dir, p.Name+".token")
+
 	// Init OIDC client
 	provider, err := oidc.NewProvider(context.Background(), p.URL)
 	if err != nil {
 		exit("init idp: %s", err)
+	}
+
+	oauth := &oauth2.Config{
+		ClientID:     p.ClientID,
+		ClientSecret: p.ClientSecret,
+		Scopes:       p.Scopes,
+		Endpoint:     provider.Endpoint(),
+		RedirectURL:  "http://" + config.ListenAddress + "/redirect",
+	}
+
+	// Try to use cached refresh token
+	if token, err := loadCachedToken(cachefile); err != nil {
+		log("couldn't load cached token: %s", err)
+	} else {
+		source := oauth.TokenSource(context.Background(), token)
+		if token, err := source.Token(); err != nil {
+			log("couldn't use cached token: %s", err)
+		} else {
+			log("using cached token")
+			if err := cacheToken(cachefile, token); err != nil {
+				log("couldn't cache token: %s", err)
+			}
+			fmt.Println(token.AccessToken)
+			return
+		}
 	}
 
 	// Generate tokens
@@ -105,14 +133,6 @@ done:
 	go http.ListenAndServe(config.ListenAddress, nil)
 	log("started web server on %s", config.ListenAddress)
 
-	oauth := &oauth2.Config{
-		ClientID:     p.ClientID,
-		ClientSecret: p.ClientSecret,
-		Scopes:       p.Scopes,
-		Endpoint:     provider.Endpoint(),
-		RedirectURL:  "http://" + config.ListenAddress + "/redirect",
-	}
-
 	// Generate login URL
 	options := []oauth2.AuthCodeOption{
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
@@ -137,10 +157,12 @@ done:
 		exit("error exchanging token: %s", err)
 	}
 
-	// TODO: Cache and reuse access_token
-	// TODO: Cache and use refresh_token
-
 	log("got access token: valid to %s", token.Expiry)
+
+	// Save tokens for reuse
+	if err := cacheToken(cachefile, token); err != nil {
+		log("couldn't cache token: %s", err)
+	}
 
 	fmt.Print(token.AccessToken)
 }
@@ -174,4 +196,31 @@ func verboseLog(format string, a ...interface{}) {
 func exit(format string, a ...interface{}) {
 	verboseLog(format, a...)
 	os.Exit(1)
+}
+
+func cacheToken(file string, token *oauth2.Token) error {
+	f, err := os.OpenFile(file, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0640)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	encoder := gob.NewEncoder(f)
+	if err := encoder.Encode(token); err != nil {
+		return err
+	}
+	return nil
+}
+
+func loadCachedToken(file string) (*oauth2.Token, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	decoder := gob.NewDecoder(f)
+	var token oauth2.Token
+	if err := decoder.Decode(&token); err != nil {
+		return nil, err
+	}
+	return &token, nil
 }
