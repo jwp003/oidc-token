@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 
 	"github.com/BurntSushi/toml"
 	"github.com/coreos/go-oidc"
@@ -141,9 +142,13 @@ done:
 	login := oauth.AuthCodeURL(state, options...)
 	log("redirecting to login: %s", login)
 
-	// Open auth page in browser
-	// TODO: Support other OS
-	cmd := exec.Command("open", login)
+	openTool := "open"
+	if runtime.GOOS == "linux" {
+		openTool = "xdg-open"
+	}
+
+	// TODO: Try multiple ways of opening browser
+	cmd := exec.Command(openTool, login)
 	stderr := bytes.NewBuffer(nil)
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
