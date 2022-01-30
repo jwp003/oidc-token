@@ -16,7 +16,7 @@ import (
 	"runtime"
 
 	"github.com/BurntSushi/toml"
-	"github.com/coreos/go-oidc"
+	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
 
@@ -25,6 +25,7 @@ var config = struct {
 	Providers     []struct {
 		Name         string
 		URL          string
+		Issuer       string
 		ClientID     string
 		ClientSecret string
 		Scopes       []string
@@ -77,8 +78,14 @@ done:
 
 	cachefile := filepath.Join(dir, p.Name+".token")
 
+	// Override issuer if needed
+	ctx := context.Background()
+	if p.Issuer != "" {
+		ctx = oidc.InsecureIssuerURLContext(ctx, p.Issuer)
+	}
+
 	// Init OIDC client
-	provider, err := oidc.NewProvider(context.Background(), p.URL)
+	provider, err := oidc.NewProvider(ctx, p.URL)
 	if err != nil {
 		exit("init idp: %s", err)
 	}
@@ -114,7 +121,7 @@ done:
 	challenge := challengify(verifier)
 
 	// Code will be sent down this channel when received
-	pendingCode := make(chan string, 0)
+	pendingCode := make(chan string)
 
 	// Setup auth redirect handler
 	http.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +195,7 @@ func challengify(s string) string {
 }
 
 func nullLog(_ string, _ ...interface{}) {
-	return
+
 }
 
 func verboseLog(format string, a ...interface{}) {
